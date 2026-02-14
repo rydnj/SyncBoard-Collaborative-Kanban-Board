@@ -41,3 +41,51 @@ Name constraints and indexes for error logging and handling purposes.
 
 NOTE: For interviews, you should be able to explain: why you chose a junction table for room membership, why UUIDs over integers, what indexes do and when to add them, and the difference between database-level constraints and ORM-level relationships. For the build itself: this schema is intentionally simple. No soft deletes, no audit trails, no polymorphism. That's by design — the spec explicitly excludes features like roles, labels, and assignees that would complicate the schema. If an interviewer asks "what would you add?", you can talk about those extensions without having built them.
 
+Alembic
+
+Alembic is a migration tool for SQLAlchemy. Think of it as version control for your database schema — just like git tracks changes to your code, Alembic tracks changes to your tables. Each migration is a script that says "here's what changed and how to undo it." This matters because in production, you can't just drop and recreate tables — you need to evolve the schema without losing data.
+
+First, in `alembic.ini`, find the line that starts with `sqlalchemy.url` and **clear its value** — we'll set it dynamically from our config instead, so leave blank temporarily.
+
+The critical line is from app.models import User, Room, RoomMember, Column, Card. Alembic works by comparing Base.metadata (which knows about all models that inherit from Base) against what's actually in the database. If you forget this import, Alembic sees no models and generates an empty migration. This is the most common Alembic gotcha.
+
+alembic revision --autogenerate -m "initial schema"
+alembic upgrade head
+
+Verify by:
+psql -h localhost -U syncboard -d syncboard -c "\dt"
+
+The concept you should be able to explain: Migrations exist because you can't just drop and recreate tables in production — real apps have data. Each migration is a versioned, reversible change to the schema. Alembic autogenerate compares your SQLAlchemy models to the live database and figures out the diff. The alembic_version table in your database tracks which migration you're currently on.
+One gotcha to remember: Autogenerate doesn't catch everything. It handles adding/removing tables and columns well, but it can miss things like renaming a column (it sees a drop + add instead).
+
+Authentication:
+
+Auth utilities are the low-level building blocks for authentication — hashing passwords so you never store them in plain text, and creating/verifying JWT tokens so the frontend can prove who it is on every request.
+Mental model for JWT: A JWT (JSON Web Token) is a signed string containing a payload (like {"user_id": "abc123"}). Your server creates it at login, the frontend stores it, and sends it back with every request. The server can verify the signature to confirm it hasn't been tampered with — no database lookup needed. That's what "stateless auth" means. The tradeoff is you can't easily revoke a token before it expires, but for SyncBoard that's fine.
+
+Why bcrypt specifically: It's intentionally slow — each hash takes ~100ms. That sounds bad, but it's the point. If someone steals your database, they can't brute-force millions of passwords per second like they could with SHA-256. Bcrypt also automatically handles salting (adding random data before hashing), so two users with the same password get different hashes.
+
+FastAPI sees Depends(get_current_user), which itself depends on Depends(bearer_scheme) and Depends(get_db). It resolves the whole chain automatically — extract token from header → verify JWT → get DB session → look up user → pass the User object to your route function. If any step fails, the request never reaches your route code. This is FastAPI's dependency injection system, and it's one of the framework's best features.
+Interview check: If someone steals a JWT token, what can they do, and how would you mitigate it in a production system? (Hint: think about token expiration, refresh tokens, and token revocation lists.)
+
+ANSWER: A stolen JWT gives full access as that user until expiration. For SyncBoard I set a 24-hour expiry, which limits the damage window. In a production system, I'd mitigate this in three ways:
+First, short-lived access tokens — drop expiration from 24 hours to 15 minutes. This shrinks the window an attacker has.
+Second, refresh tokens — when the access token expires, the frontend silently exchanges a longer-lived refresh token (stored in an httpOnly cookie) for a new access token. The user stays logged in without noticing, but any stolen access token becomes useless quickly.
+Third, a token revocation list — if you detect a compromised account, you store the token's ID in a blocklist (usually Redis for speed) and check it on every request. This breaks the 'stateless' benefit of JWTs, but it's the only way to instantly invalidate a token before expiry.
+
+In FastAPI, Depends() is magic — FastAPI intercepts it and says "don't use a default, instead call this function and inject the result." So credentials gets populated by FastAPI calling bearer_scheme(), which extracts the Bearer token from the request header.
+
+Pydantic Schemas:
+
+Pydantic schemas define the shape of data going in and out of your API. They're separate from your SQLAlchemy models — models define how data is stored in the database, schemas define how data looks in HTTP requests and responses. This separation matters because you never want to expose everything (like password hashes) and you often want the input shape to differ from the output shape.
+
+EmailStr — this comes from the pydantic[email-validation] extra we installed. It rejects malformed emails before your code even runs. So if someone sends {"email": "notanemail"}, FastAPI returns a 422 validation error automatically.
+
+model_config = {"from_attributes": True} — this is Pydantic v2 syntax (previously called orm_mode in v1). It lets you do UserResponse.model_validate(user) where user is a SQLAlchemy object. Without it, Pydantic would try to treat the SQLAlchemy model like a dictionary and fail.
+
+Auth Router:
+
+Why response_model=TokenResponse — this tells FastAPI to serialize the return value through that Pydantic schema. It strips out any extra fields and validates the response shape. It also generates accurate OpenAPI docs automatically.
+Why the same error for "no user" and "wrong password" in the login endpoint — if you returned "user not found" vs "wrong password" separately, an attacker could probe your API to figure out which emails are registered. Using one generic message for both cases is a basic security practice called preventing user enumeration.
+db.commit() then db.refresh(user) — commit() saves the new user to PostgreSQL. But the Python object doesn't yet have the auto-generated fields (id, created_at) because those were set by the database. refresh() re-reads the row from the database to populate those fields.
+
