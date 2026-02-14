@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:16
+    container_name: syncboard-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: syncboard
+      POSTGRES_PASSWORD: syncboard_dev
+      POSTGRES_DB: syncboard
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist data across container restarts
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
