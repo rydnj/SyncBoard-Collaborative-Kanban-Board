@@ -23,9 +23,9 @@
 
   // ─── Data Loading ───────────────────────────────────────────────────────────
 
-  async function loadBoard() {
+  async function loadBoard(rid) {
     try {
-      const data = await api.get(`/api/rooms/${room_id}`);
+      const data = await api.get(`/api/rooms/${rid}`);
       room = data;
       // Ensure each column has an items array (svelte-dnd-action needs 'items')
       columns = data.columns.map(col => ({
@@ -41,9 +41,9 @@
 
   // ─── WebSocket ──────────────────────────────────────────────────────────────
 
-  function connectWS() {
+  function connectWS(rid) {
     const tok = get(token);
-    ws = new WebSocket(`${PUBLIC_WS_URL}/ws/${room_id}?token=${tok}`);
+    ws = new WebSocket(`${PUBLIC_WS_URL}/ws/${rid}?token=${tok}`);
 
     ws.onopen = () => {
       wsConnected = true;
@@ -57,7 +57,7 @@
 
     ws.onclose = () => {
       wsConnected = false;
-      scheduleReconnect();
+      scheduleReconnect(rid);
     };
 
     ws.onerror = () => ws.close();
@@ -191,8 +191,8 @@
   onMount(async () => {
     if (!get(isAuthenticated)) { goto('/login'); return; }
     room_id = $page.params.room_id;
-    await loadBoard();
-    connectWS();
+    await loadBoard(room_id);
+    connectWS(room_id);
   });
 
   onDestroy(() => {
