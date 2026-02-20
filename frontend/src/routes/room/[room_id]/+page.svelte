@@ -5,10 +5,10 @@
   import { api } from '$lib/api.js';
   import { token, user, isAuthenticated } from '$lib/stores/auth.js';
   import { get } from 'svelte/store';
-  import { PUBLIC_WS_URL } from '$env/static/public';
+  import { dndzone } from 'svelte-dnd-action';
   import { flip } from 'svelte/animate';
 
-  const room_id = $page.params.room_id;
+  import { PUBLIC_WS_URL } from '$env/static/public';
 
   let room = null, columns = [], activeUsers = [];
   let loading = true, error = '';
@@ -276,7 +276,7 @@
 <!-- Card Edit Modal -->
 {#if editingCard}
   <div class="overlay" on:click={() => editingCard = null}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true">
       <h2>Edit Card</h2>
       <input type="text" bind:value={editTitle} placeholder="Title" />
       <textarea bind:value={editDesc} placeholder="Description (optional)" rows="4"></textarea>
