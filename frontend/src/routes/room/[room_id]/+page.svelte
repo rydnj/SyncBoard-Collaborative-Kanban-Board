@@ -190,6 +190,7 @@
 
   onMount(async () => {
     if (!get(isAuthenticated)) { goto('/login'); return; }
+    room_id = $page.params.room_id;
     await loadBoard();
     connectWS();
   });
