@@ -2,7 +2,7 @@
 
 A full-stack collaborative kanban board with live presence tracking and instant synchronization across all connected users. Built as a portfolio project to demonstrate real-time systems, WebSocket architecture, modern frontend development, and cloud deployment.
 
-**Live Demo:** http://107.22.25.134:3000
+**Live Demo:** [http://107.22.25.134:3000](http://34.198.77.126:3000/)
 
 ---
 
