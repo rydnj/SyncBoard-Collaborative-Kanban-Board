@@ -1,7 +1,7 @@
 # EC2 & Elastic IP Operations Guide
 
 ## Your Setup
-- **Instance:** t2.micro (AWS free tier)
+- **Instance:** t3.micro (AWS free tier)
 - **OS:** Ubuntu 24.04 LTS
 - **Elastic IP:** YOUR_ELASTIC_IP (static — won't change on restart)
 - **Ports open:** 22 (SSH), 3000 (frontend), 8000 (backend)
@@ -50,7 +50,7 @@ docker-compose restart frontend
 ## Stopping the Instance
 
 ### When to stop
-- You're done actively demoing/job searching
+- You're done actively demoing
 - You want to conserve free tier hours
 - You're not using it for more than a few days
 
@@ -104,7 +104,7 @@ Only do this when you're completely done with the project.
 
 ### Before terminating
 - [ ] Make sure all code is pushed to GitHub
-- [ ] Download any data you need from the DB (optional — this is a portfolio project so likely not needed)
+- [ ] Download any data you need from the DB (optional)
 - [ ] Disassociate and release the Elastic IP first (otherwise it keeps billing)
 
 ### How to terminate
@@ -114,16 +114,6 @@ Only do this when you're completely done with the project.
 ⚠️ Termination is permanent. The disk and all data are deleted. There is no undo.
 
 ---
-
-## Cost Summary
-
-| Resource | Cost |
-|----------|------|
-| t2.micro running (free tier) | $0/hr for first 12 months |
-| t2.micro running (after free tier) | ~$0.012/hr (~$8.76/month) |
-| Elastic IP (instance running) | $0 |
-| Elastic IP (instance stopped) | ~$0.005/hr (~$3.60/month) |
-| Data transfer (portfolio usage) | Negligible |
 
 **Set a billing alert** so you're never surprised:
 1. AWS Console → Billing → Budgets → Create Budget
