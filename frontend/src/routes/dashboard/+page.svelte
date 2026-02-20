@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import { isAuthenticated } from '$lib/stores/auth.js';
   import { get } from 'svelte/store';
+  import { addToast } from '$lib/stores/toast.js';
 
   let rooms = [], loading = true, error = '';
   let showCreate = false, showJoin = false;
@@ -32,6 +33,7 @@
       rooms = [...rooms, room];
       showCreate = false;
       newRoomName = '';
+      addToast('Room created!', 'success');
     } catch (e) { modalError = e.message; }
   }
 
@@ -43,13 +45,20 @@
       if (!rooms.find(r => r.id === room.id)) rooms = [...rooms, room];
       showJoin = false;
       joinCode = '';
+      addToast('Joined room!', 'success');
     } catch (e) { modalError = e.message; }
   }
 
   function closeModals() {
     showCreate = false; showJoin = false; modalError = '';
   }
+
+  function handleKeydown(e) {
+    if (e.key === 'Escape') closeModals();
+  }
 </script>
+
+<svelte:window on:keydown={handleKeydown} />
 
 <div class="dashboard">
   <div class="header">
@@ -61,18 +70,27 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading rooms...</p>
+    <div class="room-grid">
+      {#each [1, 2, 3] as _}
+        <div class="room-card skeleton-card">
+          <div class="skeleton" style="height:1.1rem; width:60%; margin-bottom:0.8rem"></div>
+          <div class="skeleton" style="height:0.75rem; width:35%"></div>
+        </div>
+      {/each}
+    </div>
   {:else if error}
     <p class="error">{error}</p>
   {:else if rooms.length === 0}
     <div class="empty">
-      <p>No boards yet.</p>
-      <p class="muted">Create a new room or join one with a code.</p>
+      <div class="empty-icon">📋</div>
+      <p class="empty-title">No boards yet</p>
+      <p class="empty-sub">Create a new room or join one with a code to get started.</p>
     </div>
   {:else}
     <div class="room-grid">
-      {#each rooms as room}
-        <div class="room-card" on:click={() => goto(`/room/${room.id}`)} role="button" tabindex="0">
+      {#each rooms as room, i}
+        <div class="room-card" on:click={() => goto(`/room/${room.id}`)} role="button" tabindex="0"
+             style="animation-delay: {i * 0.05}s">
           <h2>{room.name}</h2>
           <div class="room-meta">
             <span class="room-code">{room.room_code}</span>
@@ -89,7 +107,8 @@
     <div class="modal" on:click|stopPropagation>
       <h2>New Room</h2>
       {#if modalError}<p class="error">{modalError}</p>{/if}
-      <input type="text" placeholder="Room name" bind:value={newRoomName} />
+      <input type="text" placeholder="Room name" bind:value={newRoomName}
+             on:keydown={(e) => { if (e.key === 'Enter') createRoom(); }} autofocus />
       <div class="modal-actions">
         <button class="btn-ghost" on:click={closeModals}>Cancel</button>
         <button class="btn-primary" on:click={createRoom}>Create</button>
@@ -104,7 +123,8 @@
     <div class="modal" on:click|stopPropagation>
       <h2>Join Room</h2>
       {#if modalError}<p class="error">{modalError}</p>{/if}
-      <input type="text" placeholder="Room code (e.g. ESCZV8TA)" bind:value={joinCode} />
+      <input type="text" placeholder="Room code (e.g. ESCZV8TA)" bind:value={joinCode}
+             on:keydown={(e) => { if (e.key === 'Enter') joinRoom(); }} autofocus />
       <div class="modal-actions">
         <button class="btn-ghost" on:click={closeModals}>Cancel</button>
         <button class="btn-primary" on:click={joinRoom}>Join</button>
@@ -117,30 +137,55 @@
   .dashboard { max-width: 1000px; margin: 0 auto; }
   .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
   .actions { display: flex; gap: 0.8rem; }
-  h1 { font-size: 1.6rem; }
+  h1 { font-size: 1.6rem; font-weight: 700; }
 
-  .room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; }
+  .room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+
   .room-card {
     background: var(--surface);
     border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
     border-radius: var(--radius);
     padding: 1.5rem;
     cursor: pointer;
-    transition: border-color 0.2s, transform 0.15s;
+    box-shadow: var(--shadow-sm);
+    transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
+    animation: fadeIn 0.3s ease backwards;
   }
-  .room-card:hover { border-color: var(--accent); transform: translateY(-2px); }
-  .room-card h2 { font-size: 1.1rem; margin-bottom: 0.8rem; }
-  .room-code { font-size: 0.75rem; color: var(--text-muted); font-family: monospace; background: var(--bg); padding: 0.2rem 0.5rem; border-radius: 4px; }
+  .room-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md);
+  }
+  .room-card h2 { font-size: 1.1rem; margin-bottom: 0.8rem; font-weight: 600; }
+  .room-code {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: 'Courier New', monospace;
+    background: var(--bg);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  .skeleton-card {
+    border-left-color: var(--border);
+    cursor: default;
+    pointer-events: none;
+  }
 
   .empty { text-align: center; margin-top: 4rem; }
-  .muted { color: var(--text-muted); margin-top: 0.5rem; }
+  .empty-icon { font-size: 2.5rem; margin-bottom: 0.8rem; }
+  .empty-title { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.3rem; }
+  .empty-sub { color: var(--text-muted); font-size: 0.9rem; }
   .error { color: var(--accent); font-size: 0.9rem; margin-bottom: 0.5rem; }
 
   .overlay {
     position: fixed; inset: 0;
-    background: rgba(0,0,0,0.6);
+    background: rgba(0, 0, 0, 0.6);
     display: flex; align-items: center; justify-content: center;
     z-index: 100;
+    animation: fadeIn 0.15s ease;
   }
   .modal {
     background: var(--surface);
@@ -150,6 +195,8 @@
     width: 100%;
     max-width: 380px;
     display: flex; flex-direction: column; gap: 1rem;
+    box-shadow: var(--shadow-lg);
+    animation: scaleIn 0.2s ease;
   }
   .modal h2 { font-size: 1.2rem; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 0.8rem; }

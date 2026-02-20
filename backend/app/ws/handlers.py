@@ -72,17 +72,37 @@ async def handle_card_move(ws: WebSocket, room_id: str, user: dict, data: dict, 
         return
 
     old_column_id = str(card.column_id)
+
+    # Step 1: Remove card from its current column by setting a temp high position
+    # This prevents it from interfering with reindex of the source column
     card.column_id = to_column_id
-    card.position = to_position
+    card.position = -1  # temporary — out of the way
     db.flush()
 
-    # Reindex both columns to fix any gaps/conflicts
-    reindex_column(db, to_column_id)
+    # Step 2: Reindex the source column to close the gap
     if old_column_id != to_column_id:
         reindex_column(db, old_column_id)
 
+    # Step 3: Shift cards in the target column at or after to_position up by 1
+    # to make room for the moved card
+    target_cards = (
+        db.query(Card)
+        .filter(Card.column_id == to_column_id, Card.id != card.id)
+        .order_by(Card.position)
+        .all()
+    )
+    for i, c in enumerate(target_cards):
+        if i >= to_position:
+            c.position = i + 1
+        else:
+            c.position = i
+    db.flush()
+
+    # Step 4: Place the card at the exact requested position
+    card.position = to_position
     db.commit()
 
+    # Broadcast the actual final position
     await manager.broadcast(room_id, {
         "type": "card_moved",
         "card_id": card_id,
