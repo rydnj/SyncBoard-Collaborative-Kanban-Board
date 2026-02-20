@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:3000",
         "http://107.22.25.134:3000",
+        "http://34.198.77.126:3000",
     ]
 
 settings = Settings()
