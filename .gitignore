@@ -216,3 +216,29 @@ build/
 
 # Docker
 docker-compose.override.yml
+
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Alembic — keep migrations but not cache
+backend/alembic/versions/__pycache__/
+
+# SvelteKit
+frontend/.svelte-kit/
+frontend/build/
+frontend/node_modules/
+
+# Docker
+*.pem
+
+# OS
+.DS_Store
