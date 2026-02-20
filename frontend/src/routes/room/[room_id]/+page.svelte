@@ -128,7 +128,19 @@
     send({ type: 'card_move', card_id: card.id, to_column_id: colId, to_position: e.detail.items.indexOf(card) });
   }
 
-  function copyCode() { navigator.clipboard.writeText(room.room_code); }
+  function copyCode() {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(room.room_code);
+    } else {
+      // Fallback for HTTP — create a temp input and copy from it
+      const el = document.createElement('input');
+      el.value = room.room_code;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+  }
 
   onMount(async () => {
     if (!get(isAuthenticated)) { goto('/login'); return; }
