@@ -17,7 +17,7 @@ async def handle_message(ws: WebSocket, room_id: str, user: dict, data: dict, db
     elif t == "card_delete":
         await handle_card_delete(ws, room_id, user, data, db)
     elif t == "ping":
-        await manager.send_personal(ws, {"type": "pong"})
+        await manager.send_personal(ws, {"type": "pong", "sentAt": data.get("sentAt", 0)})
 
 
 def reindex_column(db: Session, column_id: str):
