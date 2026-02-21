@@ -22,6 +22,7 @@
   let addingToColumn = null, newCardTitle = '';
   let codeCopied = false;
   let focusedCards = {}; // card_id → { user_id, display_name }
+  let confirmDelete = null; // card id pending deletion
   let activityLog = []; // { id, icon, text, time }
   let showActivity = false;
 
@@ -49,21 +50,45 @@
     return u ? u.display_name : 'Someone';
   }
 
+  function timeAgo(dateStr) {
+    if (!dateStr) return '';
+    const now = new Date();
+    const d = new Date(dateStr);
+    const secs = Math.floor((now - d) / 1000);
+    if (secs < 60) return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  }
+
   // Column accent colors by title
   const colColors = { 'To Do': 'var(--col-todo)', 'In Progress': 'var(--col-progress)', 'Done': 'var(--col-done)' };
 
+  let redirecting = false; // prevents rendering after redirect
+
   async function loadBoard(rid) {
+    if (redirecting) return;
     try {
       const data = await api.get(`/api/rooms/${rid}`);
+      if (!data) {
+        redirecting = true;
+        goto('/dashboard');
+        return;
+      }
       room = data;
       columns = data.columns.map(col => ({
         ...col,
         items: col.cards.sort((a, b) => a.position - b.position)
       }));
-      error = ''; // clear any previous error
+      error = '';
     } catch (e) {
-      // Only show error if we haven't loaded the board yet
-      if (!room) error = e.message;
+      // Room doesn't exist or no access — redirect
+      redirecting = true;
+      goto('/dashboard');
+      return;
     } finally {
       loading = false;
     }
@@ -88,6 +113,7 @@
   }
 
   function scheduleReconnect(rid) {
+    if (redirecting) return;
     if (reconnectAttempts >= 5) {
       reconnecting = false;
       return;
@@ -96,8 +122,26 @@
     const delay = Math.min(1000 * 2 ** reconnectAttempts, 30000);
     reconnectAttempts++;
     reconnectTimeout = setTimeout(async () => {
-      await loadBoard(rid);
-      connectWS(rid);
+      if (redirecting) return;
+      try {
+        const data = await api.get(`/api/rooms/${rid}`);
+        if (!data) {
+          redirecting = true;
+          addToast('Room was deleted', 'info');
+          goto('/dashboard');
+          return;
+        }
+        room = data;
+        columns = data.columns.map(col => ({
+          ...col,
+          items: col.cards.sort((a, b) => a.position - b.position)
+        }));
+        connectWS(rid);
+      } catch (e) {
+        redirecting = true;
+        addToast('Room no longer exists', 'info');
+        goto('/dashboard');
+      }
     }, delay);
   }
 
@@ -225,15 +269,25 @@
     closeEdit();
   }
 
-  function deleteCard(cardId) {
+  function askDelete(cardId) {
+    confirmDelete = cardId;
+  }
+
+  function confirmDeleteCard() {
+    if (!confirmDelete) return;
     // Optimistic: remove from UI immediately
     columns = columns.map(col => ({
-      ...col, items: col.items.filter(c => c.id !== cardId)
+      ...col, items: col.items.filter(c => c.id !== confirmDelete)
     }));
-    send({ type: 'card_delete', card_id: cardId });
+    send({ type: 'card_delete', card_id: confirmDelete });
     if (editingCard) send({ type: 'card_blur', card_id: editingCard.id });
     editingCard = null;
+    confirmDelete = null;
     addToast('Card deleted', 'info');
+  }
+
+  function cancelDelete() {
+    confirmDelete = null;
   }
 
   function handleDndConsider(colId, e) {
@@ -273,14 +327,20 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === 'Escape') { closeEdit(); addingToColumn = null; }
+    if (e.key === 'Escape') { closeEdit(); addingToColumn = null; confirmDelete = null; }
+    // N to add card to first column (only when not editing/typing)
+    if (e.key === 'n' && !editingCard && !addingToColumn && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+      e.preventDefault();
+      if (columns.length > 0) startAddCard(columns[0].id);
+    }
   }
 
   onMount(async () => {
     if (!get(isAuthenticated)) { goto('/login'); return; }
     room_id = get(page).params.room_id;
     await loadBoard(room_id);
-    connectWS(room_id);
+    // Only connect WS if board loaded successfully (room exists and we have access)
+    if (room && !redirecting) connectWS(room_id);
   });
 
   onDestroy(() => {
@@ -311,6 +371,8 @@
   </div>
 {:else if error}
   <p class="error center">{error}</p>
+{:else if !room}
+  <p class="muted center">Redirecting...</p>
 {:else}
   <div class="board-header">
     <div class="board-title">
@@ -319,6 +381,7 @@
         <span class="code-text">{room.room_code}</span>
         <span class="code-icon">{codeCopied ? '✓' : '📋'}</span>
       </button>
+      <span class="total-cards">{columns.reduce((sum, c) => sum + c.items.length, 0)} cards</span>
     </div>
     <div class="presence">
       <button class="activity-toggle" class:active={showActivity} on:click={() => showActivity = !showActivity}
@@ -349,6 +412,13 @@
   {/if}
 
   <div class="board">
+    {#if columns.every(col => col.items.length === 0)}
+      <div class="board-empty">
+        <p class="empty-icon">📋</p>
+        <p class="empty-title">Board is empty</p>
+        <p class="empty-sub">Press <kbd>N</kbd> or click "+ Add card" to create your first card</p>
+      </div>
+    {/if}
     {#each columns as col (col.id)}
       <div class="column" style="--col-accent: {colColors[col.title] || 'var(--accent)'}">
         <div class="col-header">
@@ -366,6 +436,14 @@
                  animate:flip={{ duration: 150 }} on:click={() => openEdit(card)} on:keydown={(e) => { if (e.key === 'Enter') openEdit(card); }} role="button" tabindex="0">
               <p class="card-title">{card.title}</p>
               {#if card.description}<p class="card-desc">{card.description}</p>{/if}
+              <div class="card-meta">
+                {#if card.created_by}
+                  <span class="card-creator" title={getUserName(card.created_by)}>{getUserName(card.created_by)[0].toUpperCase()}</span>
+                {/if}
+                {#if card.created_at}
+                  <span class="card-time">{timeAgo(card.created_at)}</span>
+                {/if}
+              </div>
               {#if focusedCards[card.id]}
                 <p class="editing-label">{focusedCards[card.id].display_name} is editing...</p>
               {/if}
@@ -422,7 +500,7 @@
              on:keydown={(e) => { if (e.key === 'Enter') saveEdit(); }} />
       <textarea bind:value={editDesc} placeholder="Description (optional)" rows="4"></textarea>
       <div class="modal-actions">
-        <button class="btn-ghost danger" on:click={() => deleteCard(editingCard.id)}>Delete</button>
+        <button class="btn-ghost danger" on:click={() => askDelete(editingCard.id)}>Delete</button>
         <div style="display:flex; gap:0.5rem">
           <button class="btn-ghost" on:click={closeEdit}>Cancel</button>
           <button class="btn-primary" on:click={saveEdit}>Save</button>
@@ -432,8 +510,23 @@
   </div>
 {/if}
 
+{#if confirmDelete}
+  <div class="overlay" on:click={cancelDelete} on:keydown={(e) => { if (e.key === 'Escape') cancelDelete(); }} role="button" tabindex="0">
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <div class="modal confirm-modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+      <h2>Delete card?</h2>
+      <p class="confirm-text">This action cannot be undone.</p>
+      <div class="modal-actions" style="justify-content: flex-end;">
+        <button class="btn-ghost" on:click={cancelDelete}>Cancel</button>
+        <button class="btn-primary danger-btn" on:click={confirmDeleteCard}>Delete</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .center { text-align: center; margin-top: 3rem; }
+  .muted { color: var(--text-muted); }
   .error { color: var(--accent); }
 
   /* Board Header */
@@ -516,7 +609,14 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Board layout */
-  .board { display: flex; gap: 1rem; align-items: flex-start; overflow-x: auto; padding-bottom: 1rem; }
+  .board {
+    display: flex;
+    gap: 1rem;
+    align-items: stretch;
+    overflow-x: auto;
+    padding-bottom: 1rem;
+    min-height: calc(100vh - 160px);
+  }
 
   /* Columns */
   .column {
@@ -525,10 +625,12 @@
     border-top: 3px solid var(--col-accent, var(--accent));
     border-radius: var(--radius);
     padding: 1rem;
-    min-width: 280px;
-    width: 280px;
+    min-width: 320px;
+    width: 320px;
     flex-shrink: 0;
     box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
   }
   .skeleton-col {
     border-top-color: var(--border);
@@ -548,7 +650,13 @@
   }
 
   /* Cards */
-  .card-list { min-height: 60px; display: flex; flex-direction: column; gap: 0.5rem; }
+  .card-list { min-height: 60px; display: flex; flex-direction: column; gap: 0.5rem; flex: 1; }
+  /* DnD placeholder styling — svelte-dnd-action adds this class */
+  .card-list :global(.dnd-shadow-placeholder) {
+    background: rgba(233, 69, 96, 0.08) !important;
+    border: 2px dashed var(--accent) !important;
+    border-radius: var(--radius);
+  }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -582,6 +690,28 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+  .card-creator {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--border);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    font-weight: 700;
+  }
+  .card-time {
+    font-size: 0.68rem;
+    color: var(--text-muted);
   }
 
   /* Add card */
@@ -625,6 +755,31 @@
   .modal-actions { display: flex; justify-content: space-between; align-items: center; }
   .danger { color: #e57373; border-color: #e57373; }
   .danger:hover { background: rgba(229, 115, 115, 0.1); }
+  .danger-btn { background: #c62828; }
+  .danger-btn:hover { background: #b71c1c; box-shadow: none; }
+  .confirm-modal { max-width: 340px; }
+  .confirm-text { color: var(--text-muted); font-size: 0.9rem; }
+  .total-cards { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
+  .board-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 3rem;
+    text-align: center;
+  }
+  .board-empty .empty-icon { font-size: 2.5rem; margin-bottom: 0.8rem; }
+  .board-empty .empty-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.3rem; }
+  .board-empty .empty-sub { color: var(--text-muted); font-size: 0.85rem; }
+  .board-empty kbd {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.8rem;
+    font-family: monospace;
+  }
 
   /* Activity feed */
   .activity-toggle {

@@ -18,6 +18,9 @@ async function request(method, path, body = null) {
   // Auto-logout on 401 (expired token)
   if (res.status === 401) { logout(); return; }
 
+  // 204 No Content — nothing to parse
+  if (res.status === 204) return null;
+
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Request failed');
   return data;
