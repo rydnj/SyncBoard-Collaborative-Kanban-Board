@@ -16,6 +16,10 @@ async def handle_message(ws: WebSocket, room_id: str, user: dict, data: dict, db
         await handle_card_update(ws, room_id, user, data, db)
     elif t == "card_delete":
         await handle_card_delete(ws, room_id, user, data, db)
+    elif t == "card_focus":
+        await handle_card_focus(ws, room_id, user, data)
+    elif t == "card_blur":
+        await handle_card_blur(ws, room_id, user, data)
     elif t == "ping":
         await manager.send_personal(ws, {"type": "pong", "sentAt": data.get("sentAt", 0)})
 
@@ -34,7 +38,6 @@ async def handle_card_create(ws: WebSocket, room_id: str, user: dict, data: dict
     if not column_id or not title:
         return
 
-    # Position = end of column
     count = db.query(Card).filter(Card.column_id == column_id).count()
     card = Card(
         id=uuid.uuid4(),
@@ -73,18 +76,13 @@ async def handle_card_move(ws: WebSocket, room_id: str, user: dict, data: dict, 
 
     old_column_id = str(card.column_id)
 
-    # Step 1: Remove card from its current column by setting a temp high position
-    # This prevents it from interfering with reindex of the source column
     card.column_id = to_column_id
-    card.position = -1  # temporary — out of the way
+    card.position = -1
     db.flush()
 
-    # Step 2: Reindex the source column to close the gap
     if old_column_id != to_column_id:
         reindex_column(db, old_column_id)
 
-    # Step 3: Shift cards in the target column at or after to_position up by 1
-    # to make room for the moved card
     target_cards = (
         db.query(Card)
         .filter(Card.column_id == to_column_id, Card.id != card.id)
@@ -98,11 +96,9 @@ async def handle_card_move(ws: WebSocket, room_id: str, user: dict, data: dict, 
             c.position = i
     db.flush()
 
-    # Step 4: Place the card at the exact requested position
     card.position = to_position
     db.commit()
 
-    # Broadcast the actual final position
     await manager.broadcast(room_id, {
         "type": "card_moved",
         "card_id": card_id,
@@ -150,4 +146,25 @@ async def handle_card_delete(ws: WebSocket, room_id: str, user: dict, data: dict
         "type": "card_deleted",
         "card_id": card_id,
         "by": user["id"]
+    })
+
+
+# ---------- Focus/Blur (no DB, just relay to other clients) ----------
+
+async def handle_card_focus(ws: WebSocket, room_id: str, user: dict, data: dict):
+    """User opened edit modal on a card — tell everyone else."""
+    await manager.broadcast_except(room_id, ws, {
+        "type": "card_focused",
+        "card_id": data.get("card_id"),
+        "user_id": user["id"],
+        "display_name": user["display_name"]
+    })
+
+
+async def handle_card_blur(ws: WebSocket, room_id: str, user: dict, data: dict):
+    """User closed edit modal — tell everyone else to clear the indicator."""
+    await manager.broadcast_except(room_id, ws, {
+        "type": "card_blurred",
+        "card_id": data.get("card_id"),
+        "user_id": user["id"]
     })

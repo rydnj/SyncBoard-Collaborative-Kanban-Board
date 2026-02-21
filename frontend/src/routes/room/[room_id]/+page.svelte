@@ -10,6 +10,9 @@
   import { flip } from 'svelte/animate';
   import { addToast } from '$lib/stores/toast.js';
 
+  // Generate a temporary ID for optimistic updates (replaced by server ID on broadcast)
+  function tempId() { return 'temp-' + Math.random().toString(36).slice(2, 11); }
+
   let room_id = null;
   let room = null, columns = [], activeUsers = [];
   let loading = true, error = '';
@@ -18,6 +21,33 @@
   let editingCard = null, editTitle = '', editDesc = '';
   let addingToColumn = null, newCardTitle = '';
   let codeCopied = false;
+  let focusedCards = {}; // card_id → { user_id, display_name }
+  let activityLog = []; // { id, icon, text, time }
+  let showActivity = false;
+
+  function addActivity(icon, text) {
+    const now = new Date();
+    const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    activityLog = [{ id: Date.now(), icon, text, time }, ...activityLog].slice(0, 50);
+  }
+
+  function getColTitle(colId) {
+    const col = columns.find(c => c.id === colId);
+    return col ? col.title : 'unknown';
+  }
+
+  function getCardTitle(cardId) {
+    for (const col of columns) {
+      const card = col.items.find(c => c.id === cardId);
+      if (card) return card.title;
+    }
+    return 'a card';
+  }
+
+  function getUserName(userId) {
+    const u = activeUsers.find(u => u.id === userId);
+    return u ? u.display_name : 'Someone';
+  }
 
   // Column accent colors by title
   const colColors = { 'To Do': 'var(--col-todo)', 'In Progress': 'var(--col-progress)', 'Done': 'var(--col-done)' };
@@ -30,35 +60,39 @@
         ...col,
         items: col.cards.sort((a, b) => a.position - b.position)
       }));
+      error = ''; // clear any previous error
     } catch (e) {
-      error = e.message;
+      // Only show error if we haven't loaded the board yet
+      if (!room) error = e.message;
     } finally {
       loading = false;
     }
   }
 
+  let reconnecting = false;
+
   function connectWS(rid) {
     const tok = get(token);
     ws = new WebSocket(`${PUBLIC_WS_URL}/ws/${rid}?token=${tok}`);
-    ws.onopen = () => {
+    ws.onopen = async () => {
+      if (reconnecting) addToast('Back online!', 'success');
       wsConnected = true;
+      reconnecting = false;
       reconnectAttempts = 0;
-      if (reconnectAttempts === 0) { /* first connect, no toast */ }
+      // Re-fetch board state to ensure consistency after reconnect
+      await loadBoard(rid);
     };
     ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
-    ws.onclose = () => {
-      const wasConnected = wsConnected;
-      wsConnected = false;
-      if (wasConnected) scheduleReconnect(rid);
-    };
+    ws.onclose = () => { wsConnected = false; scheduleReconnect(rid); };
     ws.onerror = () => ws.close();
   }
 
   function scheduleReconnect(rid) {
     if (reconnectAttempts >= 5) {
-      addToast('Connection lost', 'error');
+      reconnecting = false;
       return;
     }
+    reconnecting = true;
     const delay = Math.min(1000 * 2 ** reconnectAttempts, 30000);
     reconnectAttempts++;
     reconnectTimeout = setTimeout(async () => {
@@ -73,16 +107,41 @@
       case 'user_joined':
         if (!activeUsers.find(u => u.id === msg.user.id))
           activeUsers = [...activeUsers, msg.user];
+        addActivity('👋', `${msg.user.display_name} joined`);
         break;
       case 'user_left':
+        { const name = getUserName(msg.user_id);
         activeUsers = activeUsers.filter(u => u.id !== msg.user_id);
+        addActivity('🚪', `${name} left`); }
         break;
       case 'card_created':
-        columns = columns.map(col =>
-          col.id === msg.card.column_id ? { ...col, items: [...col.items, msg.card] } : col
-        );
+        // Check if this is our own card (replace optimistic version)
+        { let replaced = false;
+        if (pendingCards.size > 0) {
+          // Find and replace the temp card in the same column
+          columns = columns.map(col => {
+            if (col.id !== msg.card.column_id) return col;
+            const tempIdx = col.items.findIndex(c => pendingCards.has(c.id) && c.title === msg.card.title);
+            if (tempIdx !== -1) {
+              replaced = true;
+              pendingCards.delete(col.items[tempIdx].id);
+              const items = [...col.items];
+              items[tempIdx] = msg.card;
+              return { ...col, items };
+            }
+            return col;
+          });
+        }
+        if (!replaced) {
+          // Card from another user — just add it
+          columns = columns.map(col =>
+            col.id === msg.card.column_id ? { ...col, items: [...col.items, msg.card] } : col
+          );
+        }
+        addActivity('✏️', `${getUserName(msg.by)} created "${msg.card.title}"`); }
         break;
       case 'card_moved':
+        { const cardTitle = getCardTitle(msg.card_id);
         let movedCard = null;
         columns = columns.map(col => {
           const found = col.items.find(c => c.id === msg.card_id);
@@ -97,6 +156,7 @@
             return { ...col, items };
           });
         }
+        addActivity('↕️', `${getUserName(msg.by)} moved "${cardTitle}" to ${getColTitle(msg.to_column_id)}`); }
         break;
       case 'card_updated':
         columns = columns.map(col => ({
@@ -105,11 +165,22 @@
             c.id === msg.card_id ? { ...c, title: msg.title, description: msg.description } : c
           )
         }));
+        addActivity('📝', `${getUserName(msg.by)} updated "${msg.title}"`);
         break;
       case 'card_deleted':
+        { const delTitle = getCardTitle(msg.card_id);
+        // Remove card (may already be gone if we deleted it optimistically — that's fine)
         columns = columns.map(col => ({
           ...col, items: col.items.filter(c => c.id !== msg.card_id)
         }));
+        if (delTitle !== 'a card') addActivity('🗑️', `${getUserName(msg.by)} deleted "${delTitle}"`); }
+        break;
+      case 'card_focused':
+        focusedCards = { ...focusedCards, [msg.card_id]: { user_id: msg.user_id, display_name: msg.display_name } };
+        break;
+      case 'card_blurred':
+        focusedCards = { ...focusedCards };
+        delete focusedCards[msg.card_id];
         break;
     }
   }
@@ -120,22 +191,47 @@
 
   function startAddCard(colId) { addingToColumn = colId; newCardTitle = ''; }
 
+  let pendingCards = new Set(); // track temp IDs of cards we created optimistically
+
   function submitNewCard(colId) {
     if (!newCardTitle.trim()) { addingToColumn = null; return; }
-    send({ type: 'card_create', column_id: colId, title: newCardTitle.trim() });
+    const title = newCardTitle.trim();
+    const tid = tempId();
+
+    // Optimistic: add card to UI immediately
+    const optimisticCard = { id: tid, column_id: colId, title, description: '', position: 999 };
+    columns = columns.map(col =>
+      col.id === colId ? { ...col, items: [...col.items, optimisticCard] } : col
+    );
+    pendingCards.add(tid);
+
+    send({ type: 'card_create', column_id: colId, title });
     addingToColumn = null; newCardTitle = '';
   }
 
-  function openEdit(card) { editingCard = card; editTitle = card.title; editDesc = card.description || ''; }
+  function openEdit(card) {
+    editingCard = card; editTitle = card.title; editDesc = card.description || '';
+    send({ type: 'card_focus', card_id: card.id });
+  }
+
+  function closeEdit() {
+    if (editingCard) send({ type: 'card_blur', card_id: editingCard.id });
+    editingCard = null;
+  }
 
   function saveEdit() {
     if (!editTitle.trim()) return;
     send({ type: 'card_update', card_id: editingCard.id, title: editTitle.trim(), description: editDesc });
-    editingCard = null;
+    closeEdit();
   }
 
   function deleteCard(cardId) {
+    // Optimistic: remove from UI immediately
+    columns = columns.map(col => ({
+      ...col, items: col.items.filter(c => c.id !== cardId)
+    }));
     send({ type: 'card_delete', card_id: cardId });
+    if (editingCard) send({ type: 'card_blur', card_id: editingCard.id });
     editingCard = null;
     addToast('Card deleted', 'info');
   }
@@ -177,7 +273,7 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === 'Escape') { editingCard = null; addingToColumn = null; }
+    if (e.key === 'Escape') { closeEdit(); addingToColumn = null; }
   }
 
   onMount(async () => {
@@ -188,8 +284,9 @@
   });
 
   onDestroy(() => {
-    if (ws) ws.close();
+    reconnectAttempts = 5; // prevent any pending reconnect from firing
     if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    if (ws) ws.close();
   });
 </script>
 
@@ -224,6 +321,10 @@
       </button>
     </div>
     <div class="presence">
+      <button class="activity-toggle" class:active={showActivity} on:click={() => showActivity = !showActivity}
+              title="Activity feed">
+        📜 {#if activityLog.length > 0}<span class="activity-badge">{activityLog.length}</span>{/if}
+      </button>
       {#each activeUsers as u, i}
         <div class="avatar" style="background: {avatarColor(u.display_name)}; z-index: {activeUsers.length - i};"
              title={u.display_name}>
@@ -235,10 +336,15 @@
     </div>
   </div>
 
-  {#if !wsConnected && reconnectAttempts >= 5}
+  {#if reconnecting}
+    <div class="banner reconnecting">
+      <span class="reconnect-spinner"></span>
+      Reconnecting... (attempt {reconnectAttempts} of 5)
+    </div>
+  {:else if !wsConnected && reconnectAttempts >= 5}
     <div class="banner">
       ⚠ Connection lost.
-      <button class="btn-ghost" on:click={() => { reconnectAttempts = 0; connectWS(room_id); }}>Retry</button>
+      <button class="btn-ghost" on:click={() => { reconnectAttempts = 0; reconnecting = true; connectWS(room_id); }}>Retry</button>
     </div>
   {/if}
 
@@ -256,9 +362,13 @@
           on:finalize={(e) => handleDndFinalize(col.id, e)}
         >
           {#each col.items as card (card.id)}
-            <div class="card" animate:flip={{ duration: 150 }} on:click={() => openEdit(card)} on:keydown={(e) => { if (e.key === 'Enter') openEdit(card); }} role="button" tabindex="0">
+            <div class="card" class:card-focused={focusedCards[card.id]}
+                 animate:flip={{ duration: 150 }} on:click={() => openEdit(card)} on:keydown={(e) => { if (e.key === 'Enter') openEdit(card); }} role="button" tabindex="0">
               <p class="card-title">{card.title}</p>
               {#if card.description}<p class="card-desc">{card.description}</p>{/if}
+              {#if focusedCards[card.id]}
+                <p class="editing-label">{focusedCards[card.id].display_name} is editing...</p>
+              {/if}
             </div>
           {/each}
         </div>
@@ -279,10 +389,32 @@
       </div>
     {/each}
   </div>
+
+  {#if showActivity}
+    <div class="activity-panel">
+      <div class="activity-header">
+        <h3>Activity</h3>
+        <button class="activity-close" on:click={() => showActivity = false}>✕</button>
+      </div>
+      {#if activityLog.length === 0}
+        <p class="activity-empty">No activity yet</p>
+      {:else}
+        <div class="activity-list">
+          {#each activityLog as entry (entry.id)}
+            <div class="activity-item">
+              <span class="activity-icon">{entry.icon}</span>
+              <span class="activity-text">{entry.text}</span>
+              <span class="activity-time">{entry.time}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 {/if}
 
 {#if editingCard}
-  <div class="overlay" on:click={() => editingCard = null} on:keydown={(e) => { if (e.key === 'Escape') editingCard = null; }} role="button" tabindex="0">
+  <div class="overlay" on:click={closeEdit} on:keydown={(e) => { if (e.key === 'Escape') closeEdit(); }} role="button" tabindex="0">
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
       <h2>Edit Card</h2>
@@ -292,7 +424,7 @@
       <div class="modal-actions">
         <button class="btn-ghost danger" on:click={() => deleteCard(editingCard.id)}>Delete</button>
         <div style="display:flex; gap:0.5rem">
-          <button class="btn-ghost" on:click={() => editingCard = null}>Cancel</button>
+          <button class="btn-ghost" on:click={closeEdit}>Cancel</button>
           <button class="btn-primary" on:click={saveEdit}>Save</button>
         </div>
       </div>
@@ -366,11 +498,22 @@
     margin-bottom: 1rem;
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.75rem;
     font-size: 0.9rem;
     box-shadow: var(--shadow-sm);
     animation: fadeIn 0.3s ease;
   }
+  .banner.reconnecting { background: #5a4a1a; }
+  .reconnect-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Board layout */
   .board { display: flex; gap: 1rem; align-items: flex-start; overflow-x: auto; padding-bottom: 1rem; }
@@ -421,6 +564,16 @@
     transform: translateY(-1px);
   }
   .card:active { cursor: grabbing; }
+  .card-focused {
+    border-color: var(--warning) !important;
+    box-shadow: 0 0 0 1px var(--warning), var(--shadow-sm) !important;
+  }
+  .editing-label {
+    font-size: 0.7rem;
+    color: var(--warning);
+    margin-top: 0.4rem;
+    font-style: italic;
+  }
   .card-title { font-size: 0.9rem; font-weight: 500; }
   .card-desc {
     font-size: 0.8rem;
@@ -472,4 +625,80 @@
   .modal-actions { display: flex; justify-content: space-between; align-items: center; }
   .danger { color: #e57373; border-color: #e57373; }
   .danger:hover { background: rgba(229, 115, 115, 0.1); }
+
+  /* Activity feed */
+  .activity-toggle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.3rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    margin-right: 0.75rem;
+    position: relative;
+    transition: border-color var(--transition), background var(--transition);
+  }
+  .activity-toggle:hover, .activity-toggle.active { border-color: var(--accent); color: var(--text); }
+  .activity-badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    background: var(--accent);
+    color: white;
+    font-size: 0.6rem;
+    font-weight: 700;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .activity-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 300px;
+    height: 100vh;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    animation: slideIn 0.2s ease;
+  }
+  @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+  .activity-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .activity-header h3 { font-size: 1rem; font-weight: 600; }
+  .activity-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1rem;
+    padding: 0.2rem 0.4rem;
+    cursor: pointer;
+  }
+  .activity-close:hover { color: var(--text); }
+  .activity-empty { color: var(--text-muted); font-size: 0.85rem; padding: 2rem 1.2rem; text-align: center; }
+  .activity-list { overflow-y: auto; flex: 1; padding: 0.5rem 0; }
+  .activity-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.6rem 1.2rem;
+    font-size: 0.82rem;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    animation: fadeIn 0.2s ease;
+  }
+  .activity-item:hover { background: rgba(255,255,255,0.02); }
+  .activity-icon { flex-shrink: 0; font-size: 0.85rem; }
+  .activity-text { flex: 1; color: var(--text); line-height: 1.4; }
+  .activity-time { flex-shrink: 0; color: var(--text-muted); font-size: 0.7rem; margin-top: 1px; }
 </style>
