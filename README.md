@@ -2,7 +2,7 @@
 
 A full-stack collaborative kanban board with live presence tracking, editing indicators, activity feeds, and instant synchronization across all connected users. Built to demonstrate real-time systems, WebSocket architecture, modern frontend development, and cloud deployment.
 
-**Live Demo:** http://34.198.77.126:3000
+**Live Demo:** [http://syncboard.live](http://syncboard.live)
 
 ---
 
